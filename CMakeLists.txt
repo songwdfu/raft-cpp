@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 project(raft-kv)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 add_definitions(-Wall)
 add_definitions(-DDEBUG)
@@ -24,6 +24,14 @@ set(LIBS
     pthread
     Boost::system
     Boost::filesystem
+    )
+
+pkg_check_modules(rocksdb REQUIRED
+                  zlib REQUIRED)
+include_directories(${rocksdb_INCLUDE_DIRS})
+link_libraries(
+    rocksdb
+    z
     )
 
 add_subdirectory(raft-kv)

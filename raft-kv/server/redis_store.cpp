@@ -132,7 +132,20 @@ RedisStore::RedisStore(RaftNode* server, std::vector<uint8_t> snap, uint16_t por
       acceptor_(io_service_),
       next_request_id_(0) {
 
+  // start a new dp instance
+  options_.IncreaseParallelism();
+  options_.OptimizeLevelStyleCompaction();
+  options_.create_if_missing = true;
+  std::string node_id = std::to_string(server->node_id());
+  kDBPath = std::move(node_id);
+  rocksdb::Status s = rocksdb::DB::Open(options_, kDBPath, &db_);
+  if (!s.ok()) {
+    std::cerr << "Error opening rocksdb: " << s.ToString() << std::endl;
+    exit(1);
+  }
+
   if (!snap.empty()) {
+    // install snapshot to db
     std::unordered_map<std::string, std::string> kv;
     msgpack::object_handle oh = msgpack::unpack((const char*) snap.data(), snap.size());
     try {
@@ -140,7 +153,10 @@ RedisStore::RedisStore(RaftNode* server, std::vector<uint8_t> snap, uint16_t por
     } catch (std::exception& e) {
       LOG_WARN("invalid snapshot");
     }
-    std::swap(kv, key_values_);
+    // std::swap(kv, key_values_);
+    for (const auto& pair : kv){
+      db_->Put(rocksdb::WriteOptions(), pair.first, pair.second);
+    }
   }
 
   auto address = boost::asio::ip::address::from_string("0.0.0.0");
@@ -240,14 +256,26 @@ void RedisStore::del(std::vector<std::string> keys, const StatusCallback& callba
 void RedisStore::get_snapshot(const GetSnapshotCallback& callback) {
   io_service_.post([this, callback] {
     msgpack::sbuffer sbuf;
-    msgpack::pack(sbuf, this->key_values_);
+    // unordered map snapshot
+    // msgpack::pack(sbuf, this->key_values_);
+
+    // rocksdb snapshot 
+    rocksdb::ReadOptions read_options;
+    read_options.snapshot = db_->GetSnapshot();
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(read_options));
+    for (it->SeekToFirst(); it->Valid(); it->Next()){
+      msgpack::pack(sbuf, std::make_pair(it->key().ToString(), it->value().ToString()));
+    }
+
     SnapshotDataPtr data(new std::vector<uint8_t>(sbuf.data(), sbuf.data() + sbuf.size()));
     callback(data);
+
   });
 }
 
 void RedisStore::recover_from_snapshot(SnapshotDataPtr snap, const StatusCallback& callback) {
   io_service_.post([this, snap, callback] {
+    // unorderedx map recovery
     std::unordered_map<std::string, std::string> kv;
     msgpack::object_handle oh = msgpack::unpack((const char*) snap->data(), snap->size());
     try {
@@ -256,15 +284,26 @@ void RedisStore::recover_from_snapshot(SnapshotDataPtr snap, const StatusCallbac
       callback(Status::io_error("invalid snapshot"));
       return;
     }
-    std::swap(kv, key_values_);
+    // std::swap(kv, key_values_);
+    for (const auto& pair : kv){
+      db_->Put(rocksdb::WriteOptions(), pair.first, pair.second);
+    }
     callback(Status::ok());
   });
 }
 
 void RedisStore::keys(const char* pattern, int len, std::vector<std::string>& keys) {
-  for (auto it = key_values_.begin(); it != key_values_.end(); ++it) {
-    if (string_match_len(pattern, len, it->first.c_str(), it->first.size(), 0)) {
-      keys.push_back(it->first);
+  // for (auto it = key_values_.begin(); it != key_values_.end(); ++it) {
+  //   if (string_match_len(pattern, len, it->first.c_str(), it->first.size(), 0)) {
+  //     keys.push_back(it->first);
+  //   }
+  // }
+  // get all the keys and put into keys vector
+  rocksdb::Iterator* it = db_->NewIterator(rocksdb::ReadOptions());
+  for (it->SeekToFirst(); it->Valid(); it->Next()){
+    const std::string key = it->key().ToString();
+    if (string_match_len(pattern, len, key.c_str(), key.size(), 0)) {
+      keys.push_back(it->key().ToString());
     }
   }
 }
@@ -286,12 +325,21 @@ void RedisStore::read_commit(proto::EntryPtr entry) {
     switch (data.type) {
       case RedisCommitData::kCommitSet: {
         assert(data.strs.size() == 2);
-        this->key_values_[std::move(data.strs[0])] = std::move(data.strs[1]);
+        // this->key_values_[std::move(data.strs[0])] = std::move(data.strs[1]);
+        // rocksdb set
+        // rocksdb::Slice key_slice(std::move(data.strs[0]));
+        // rocksdb::Slice value_slice(std::move(data.strs[1]));
+        // rocksdb::Status s = db_->Put(rocksdb::WriteOptions(), key_slice, value_slice);
+        rocksdb::Status s = db_->Put(rocksdb::WriteOptions(), data.strs[0], data.strs[1]);
+        assert(s.ok());
         break;
       }
       case RedisCommitData::kCommitDel: {
         for (const std::string& key : data.strs) {
-          this->key_values_.erase(key);
+          // this->key_values_.erase(key);
+          // rocksdb del
+          rocksdb::Status s = db_->Delete(rocksdb::WriteOptions(), key);
+          assert(s.ok());
         }
         break;
       }

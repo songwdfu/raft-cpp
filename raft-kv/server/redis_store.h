@@ -3,9 +3,11 @@
 #include <unordered_map>
 #include <thread>
 #include <future>
+#include <iostream>
 #include <raft-kv/common/status.h>
 #include <raft-kv/raft/proto.h>
 #include <msgpack.hpp>
+#include "rocksdb/db.h"
 
 namespace kv {
 
@@ -52,13 +54,19 @@ class RedisStore {
   void start(std::promise<pthread_t>& promise);
 
   bool get(const std::string& key, std::string& value) {
-    auto it = key_values_.find(key);
-    if (it != key_values_.end()) {
-      value = it->second;
-      return true;
-    } else {
+    rocksdb::Status s = db_->Get(rocksdb::ReadOptions(), key, &value);
+    if (s.IsNotFound()){
       return false;
+    } else {
+      return true;
     }
+    // auto it = key_values_.find(key);
+    // if (it != key_values_.end()) {
+    //   value = it->second;
+    //   return true;
+    // } else {
+    //   return false;
+    // }
   }
 
   void set(std::string key, std::string value, const StatusCallback& callback);
@@ -80,9 +88,13 @@ class RedisStore {
   boost::asio::io_service io_service_;
   boost::asio::ip::tcp::acceptor acceptor_;
   std::thread worker_;
-  std::unordered_map<std::string, std::string> key_values_;
+  // std::unordered_map<std::string, std::string> key_values_;
   uint32_t next_request_id_;
   std::unordered_map<uint32_t, StatusCallback> pending_requests_;
+  // rocksdb instances
+  rocksdb::DB* db_;
+  rocksdb::Options options_;
+  std::string kDBPath;
 };
 
 }
